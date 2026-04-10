@@ -1,0 +1,22 @@
+{
+  "name": "finance-manual-batch-v2",
+  "max_concurrent_runs": 1,
+  "tasks": [
+    {
+      "task_key": "manual_batch_medallion_v2",
+      "description": "canonical + gold_v2 build, acceptance gate, and cutover",
+      "existing_cluster_id": "<REPLACE_WITH_CLUSTER_ID>",
+      "spark_python_task": {
+        "python_file": "file:/Workspace/Repos/<REPLACE_WITH_USER>/<REPLACE_WITH_REPO>/databricks/lakeflow/manual_batch_medallion.py"
+      },
+      "timeout_seconds": 0
+    }
+  ],
+  "queue": {
+    "enabled": true
+  },
+  "tags": {
+    "mode": "manual",
+    "version": "v2-only"
+  }
+}
