@@ -1,16 +1,16 @@
--- Canonical + Gold v2 repair script
--- Run in Databricks SQL / notebook against Unity Catalog.
+-- 正規化 + Gold v2 修復スクリプト
+-- Databricks SQL / Notebook（Unity Catalog）で実行してください。
 
 -- =====================================================================
--- 0) Base assumptions
+-- 0) 前提
 -- =====================================================================
--- Source table:
+-- 入力テーブル:
 --   watanabe.finance_silver.transactions
--- Analysis window:
---   2025-09-01 onward
+-- 分析対象期間:
+--   2025-09-01 以降
 
 -- =====================================================================
--- 1) Canonical typed layer
+-- 1) 型正規化レイヤー
 -- =====================================================================
 CREATE OR REPLACE VIEW watanabe.finance_gold.canonical_typed_v1 AS
 WITH base AS (
@@ -45,7 +45,7 @@ WITH base AS (
     CASE
       WHEN lower(direction) = 'inflow' THEN ABS(amount_raw)
       WHEN lower(direction) = 'outflow' THEN -ABS(amount_raw)
-      ELSE CASE WHEN amount_raw >= 0 THEN amount_raw ELSE amount_raw END
+      ELSE amount_raw
     END AS amount_signed
   FROM base
 )
@@ -54,8 +54,8 @@ FROM typed
 WHERE txn_date >= DATE '2025-09-01';
 
 -- =====================================================================
--- 2) Canonical dedup layer
---    Rule: prefer txn_id; fallback to business key; keep latest run_id
+-- 2) 重複排除レイヤー
+--    ルール: txn_id 優先、なければビジネスキー、最新 run_id を採用
 -- =====================================================================
 CREATE OR REPLACE VIEW watanabe.finance_gold.canonical_deduped_v1 AS
 WITH keyed AS (
@@ -87,7 +87,7 @@ FROM ranked
 WHERE rn = 1;
 
 -- =====================================================================
--- 3) Deterministic reclassification layer
+-- 3) 決定的再分類レイヤー
 -- =====================================================================
 CREATE OR REPLACE VIEW watanabe.finance_gold.canonical_reclassified_v1 AS
 SELECT
@@ -154,7 +154,7 @@ SELECT
 FROM watanabe.finance_gold.canonical_deduped_v1;
 
 -- =====================================================================
--- 4) QA visibility layer
+-- 4) QA 可視化レイヤー
 -- =====================================================================
 CREATE OR REPLACE VIEW watanabe.finance_gold.canonical_qa_v1 AS
 SELECT
@@ -168,9 +168,8 @@ SELECT
 FROM watanabe.finance_gold.canonical_reclassified_v1;
 
 -- =====================================================================
--- 5) Repaired Gold outputs (_v2)
+-- 5) 修正済み Gold 出力（_v2）
 -- =====================================================================
-
 CREATE OR REPLACE TABLE watanabe.finance_gold.monthly_cashflow_v2 AS
 SELECT
   year_month,
@@ -247,14 +246,14 @@ FROM watanabe.finance_gold.canonical_reclassified_v1
 WHERE COALESCE(needs_review_flag, false) = true;
 
 -- =====================================================================
--- 6) Manual validation SQL (Acceptance Tests A-H)
+-- 6) 手動検証 SQL（Acceptance Tests A-H）
 -- =====================================================================
 
--- A1: scope starts at 2025-09
+-- A1: 分析開始月が 2025-09 以降であること
 SELECT MIN(year_month) AS min_month, MAX(year_month) AS max_month
 FROM watanabe.finance_gold.monthly_cashflow_v2;
 
--- B1: duplicate count by canonical key after dedup
+-- B1: 重複キー残件数
 SELECT COUNT(*) AS duplicate_key_count
 FROM (
   SELECT canonical_dedup_key, COUNT(*) AS c
@@ -263,20 +262,20 @@ FROM (
   HAVING COUNT(*) > 1
 ) t;
 
--- C1: inflow-as-expense anomalies
+-- C1: inflow が expense の異常件数
 SELECT COUNT(*) AS inflow_expense_anomaly_count
 FROM watanabe.finance_gold.canonical_reclassified_v1
 WHERE transaction_kind = 'expense'
   AND lower(direction) = 'inflow';
 
--- C2: excluded kinds accidentally included in spend
+-- C2: 除外種別なのに spend 対象になっている件数
 SELECT transaction_kind, COUNT(*) AS bad_rows
 FROM watanabe.finance_gold.canonical_reclassified_v1
 WHERE transaction_kind IN ('internal_transfer', 'card_payment', 'investment', 'emoney_transfer', 'refund', 'fee')
   AND is_spend_target = true
 GROUP BY transaction_kind;
 
--- D1 / D2 / D3: cashflow contract and formula consistency
+-- D1 / D2 / D3: 月次契約と net 式の整合性
 SELECT
   year_month,
   income_amount,
@@ -286,7 +285,7 @@ SELECT
 FROM watanabe.finance_gold.monthly_cashflow_v2
 ORDER BY year_month;
 
--- E1: category coverage and 'その他' share
+-- E1: カテゴリ網羅率（その他比率）
 SELECT
   year_month,
   SUM(CASE WHEN category_lv1 = 'その他' THEN spend_amount ELSE 0 END) AS other_spend,
@@ -298,16 +297,15 @@ FROM watanabe.finance_gold.monthly_spend_by_category_v2
 GROUP BY year_month
 ORDER BY year_month;
 
--- F1: targeted review distribution
+-- F1: レビュー理由の分布
 SELECT year_month, review_reason, review_count
 FROM watanabe.finance_gold.review_queue_count_v2
 ORDER BY year_month, review_count DESC;
 
--- G1: dashboard-safe schema smoke check
+-- G1: ダッシュボード安全性（スキーマ確認）
 DESCRIBE TABLE watanabe.finance_gold.monthly_cashflow_v2;
 DESCRIBE TABLE watanabe.finance_gold.monthly_spend_by_category_v2;
 DESCRIBE TABLE watanabe.finance_gold.monthly_spend_by_owner_v2;
 DESCRIBE TABLE watanabe.finance_gold.monthly_savings_estimate_v2;
 DESCRIBE TABLE watanabe.finance_gold.data_completeness_v2;
 DESCRIBE TABLE watanabe.finance_gold.review_queue_count_v2;
-

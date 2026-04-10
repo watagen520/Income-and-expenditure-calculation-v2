@@ -1,47 +1,46 @@
-# Repair implementation (minimal, repo-safe)
+# 修復実装方針（最小・安全）
 
-## 1) Understanding summary
-This repository is currently documentation-only in this checkout, but the intended runtime is a Databricks medallion pipeline where Silver already exists (`watanabe.finance_silver.transactions`) and Gold tables are built for dashboards.
+## 1) 理解サマリ
+このチェックアウトでは実行用コードは含まれておらず、主に要件ドキュメントのみが存在します。
+一方で運用前提は Databricks 上のメダリオン処理（Silver 既存、Gold 集計）です。
 
-Given the constraints, the smallest safe repair is to provide a **drop-in SQL repair script** that introduces a canonical stabilization layer (as views) and then rebuilds Gold outputs from that canonical layer, while preserving:
+そのため、既存ワークフロー（VSCode -> GitHub -> Databricks Repos）を壊さずに最小変更で修復するため、
+**Databricks でそのまま実行可能な SQL 修復スクリプト**を追加する方針とします。
 
-- VSCode -> GitHub -> Databricks Repos workflow
-- manual Databricks execution model
-- existing semantics and table names (with `_v2` outputs first)
+## 2) 根本原因
+1. **対象期間漏れ**: Gold 側で 2025-09-01 以降の分析期間制約が徹底されていない。
+2. **重複増幅**: Gold 前に正規化重複排除ステージがない/弱い。
+3. **流入誤分類**: 銀行流入の高信頼ルール再分類が不足し、`expense` が混入。
+4. **支出汚染**: `is_spend_target` と `transaction_kind` の組み合わせ制約が弱い。
+5. **Gold 契約不安定**: 月次キーや KPI 導出式が安定提供されていない。
+6. **レビュー過多**: `rule_not_confident` 依存が強く、レビュー対象が肥大化。
 
-## 2) Root causes (mapped from observed symptoms)
-1. **Period leakage**: Gold aggregates are not constrained to business scope (`2025-09-01` onward).
-2. **Duplicate amplification**: no canonical dedup stage before Gold aggregation.
-3. **Inflow mislabeling**: deterministic bank-inflow rules are missing/insufficient, leaving obvious inflows as `expense`.
-4. **Spend contamination**: spend KPI logic is applied too early/loosely, allowing excluded kinds into spend.
-5. **Gold contract instability**: monthly outputs do not consistently expose stable `year_month` and explicit KPI derivations.
-6. **Review queue overload**: too many generic `rule_not_confident` without targeted routing for ambiguous transfer patterns.
+## 3) 不具合と修正対象
+本リポジトリの現状態では既存 Python パイプライン本体が確認できないため、
+以下の Databricks オブジェクトを修正対象とします。
 
-## 3) Defects -> likely code/data locations
-In the current checkout, executable pipeline files are not present. Therefore the repair is targeted to Databricks SQL objects over the existing observed Silver table:
+- 入力: `watanabe.finance_silver.transactions`
+- 正規化ビュー: `watanabe.finance_gold.canonical_*`
+- 修正 Gold 出力: `watanabe.finance_gold.*_v2`
 
-- Source: `watanabe.finance_silver.transactions`
-- New canonical views: `watanabe.finance_gold.canonical_*`
-- Repaired Gold outputs: `watanabe.finance_gold.*_v2`
+## 4) 最小安全修復プラン
+1. 型正規化ビュー（`txn_date`、`year_month`、符号/絶対額）を追加。
+2. `txn_id` 優先 + 代替ビジネスキーの重複排除ビューを追加（最新 `run_id` 採用）。
+3. 銀行流入の決定的再分類ビューを追加。
+4. QA 可視化ビューを追加。
+5. 上記 canonical から Gold `_v2` を再集計。
+6. ACCEPTANCE_TESTS.md に対応した検証 SQL を同梱。
 
-## 4) Smallest safe repair plan
-1. Add typed canonical view with normalized dates, month key, and signed/absolute amounts.
-2. Add dedup canonical view using `txn_id` primary preference and documented business-key fallback; keep latest `run_id`.
-3. Add deterministic reclassification view for high-confidence inflow fixes.
-4. Add QA view for anomaly visibility.
-5. Rebuild Gold `_v2` aggregates from canonical semantics only.
-6. Provide validation SQL snippets for all acceptance checks.
+## 5) 受け入れ基準への対応
+- **A1 期間**: `txn_date >= '2025-09-01'` で制約。
+- **B1 重複**: canonical キー単位で `ROW_NUMBER=1` を採用。
+- **C1/C2 種別**: 銀行流入ルール再分類 + `expense && is_spend_target=true` のみを実支出化。
+- **D1/D2/D3 KPI**: `year_month` 明示、`net = income - spend` を固定、支出は正値表示。
+- **E1 カテゴリ**: `monthly_spend_by_category_v2` と「その他比率」検証クエリで改善可視化。
+- **F1 レビュー**: 人間確認が必要な個人間送金を `person_to_person_transfer` に集約。
+- **G1 契約**: ダッシュボード向け安定フィールドを `_v2` で提供。
+- **H 検証 SQL**: スクリプト内に手動検証 SQL を網羅。
 
-## 5) Acceptance-tests mapping (how this plan satisfies tests)
-- **A1 Scope**: canonical layer filters to `txn_date >= '2025-09-01'`.
-- **B1 Duplicates**: dedup CTE retains one row per canonical key with latest `run_id`.
-- **C1/C2 Transaction semantics**: inflow reclassification and explicit spend filter (`transaction_kind='expense' AND is_spend_target=true`).
-- **D1/D2/D3 KPI contract**: stable `year_month`; explicit net formula; spend shown as positive display metric.
-- **E1 Category quality**: category outputs from repaired spend semantics; includes visibility queries for `その他` share.
-- **F1 Review targeting**: ambiguous transfer patterns get targeted review reason.
-- **G1 Dashboard-safe Gold**: stable `_v2` outputs with documented fields.
-- **H Manual validation SQL**: included in dedicated section of script.
-
-## Notes
-- This is intentionally SQL-first to minimize structural disruption.
-- Once validated, `_v2` objects can replace legacy Gold outputs in a controlled cutover.
+## 補足
+- 構造変更は避け、SQL ベースで最小修復しています。
+- 数値検証後に `_v2` から既存 Gold へ段階切替する運用を推奨します。
